@@ -4,13 +4,21 @@ import json
 import pathlib
 import time
 from .mathdef import *
+from aqt.previewer import Previewer
+from aqt.previewer import SingleCardPreviewer as PreviewerDialog
+from anki.cards import Card
+from aqt.utils import showInfo
 
 
 class DynaMathManager:
 
-    def __init__(self, custom_dialog):
+    def __init__(self, custom_dialog=None):
         self.dialog = custom_dialog
-        
+        self.previewer = None
+        self.card = None
+        self.note = None
+        self.prev_bool = False
+
         self.variables = []  # TODO change into map?
         self.temp_variables = {}
         self.supportedOperations = ['+', '-', '*', '/', '(', ')', '^']
@@ -19,14 +27,14 @@ class DynaMathManager:
         self.text_handler = TextHandler(self)
         self.algo_handler = AlgorithmHandler(self)
 
+    def card(self):
+        return self.card
     #
     # ADDING ANKI NOTES
     #
-    def addMathNote(self, front, back, algo):
+    def addMathNote(self, front, back, algo, deck_name, add_note):
         # did = deck id, mid = model id, ... etc.
-
-        deck_name = "testDeck"
-        model_name = "TestModel3"
+        model_name = "DynaMath-" + deck_name
 
         deck_id = mw.col.decks.id(deck_name)
 
@@ -51,35 +59,59 @@ class DynaMathManager:
         mw.col.reset()  # reset DB for GUI to show
         mw.reset()
 
-        self.print("Keys: " + str(note.keys()))
-        self.print("Values: " + str(note.values()))
-        self.print("Cards: " + str(note.cards()))
+        if not add_note:
+            self.card = note.cards()[0]
+            self.note = note
 
     #
     # GENERATING FRONT/BACK PREVIEW & EXECUTING ALGORITHM
     #
-    def showPreview(self, question_text, answer_text, algo_text):
+    def showPreview(self, question_text, answer_text, algo_text, deck_name, add_note=False,):
+        if not add_note and self.previewer is not None:  # Previewer not closed
+            self.previewer.close()
+
         self.variables = []
         self.text_handler.updateVariables()
         self.algo_handler.updateVariables()
 
-        question_text = "What! is [$]{Var(x,Integer,1,10)} + {Var(y,Integer,11,100)} - 2{Var(x)}[/$]"
-
-        answer_text = "The answer is {Var(z)}"
-
-        algo_text = "t = 4 + 9 \n " \
-                    "F = der(x,p1,p2) + t"
-
-        start = time.time()
+        question_text = "What! is [$]{Var(x,Integer,1,10)} + {Var(y,Integer,11,100)} - 2*{Var(x)}[/$]"
+        answer_text = "The answer is {Var(output)}"
+        algo_text = " output = x + y - 2*x \n"
 
         question_text = self.text_handler.parseRawText(question_text)
         self.algo_handler.parseAlgorithm(algo_text)
         answer_text = self.text_handler.parseRawText(answer_text)
-        # TODO: should be export button or make card button
-        self.addMathNote(question_text, answer_text, algo_text)
 
-        self.print("Process Time = " + str(time.time() - start))
+        self.addMathNote(question_text, answer_text, algo_text, deck_name, add_note)
 
+        # Set console cursor to end
+        if self.dialog is not None:
+            cursor = self.dialog.output_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.dialog.output_text.setTextCursor(cursor)
+
+        # Preview
+        if not add_note:
+            self.previewer = PreviewerDialog(self.card, self, mw, self._on_preview_closed)
+            self.previewer.open()
+
+    def _on_preview_closed(self):
+        self.previewer = None
+        mw.col.remNotes([self.note.id])  # TODO: not removing, correct nid?
+        mw.col.save()
+        self.note = None
+        self.card = None
+        mw.col.reset()  # reset DB for GUI to show
+        mw.reset()
+    #
+    # GENERATE FRONT/BACK FOR REVIEW
+    #
+    def generateQuestion(self, text):
+        return self.text_handler.parseRawText(text, True, True)
+
+    def generateAnswer(self, text, algo_text):
+        self.algo_handler.parseAlgorithm(algo_text)
+        return self.text_handler.parseRawText(text, True, False)
     #
     # HELPERS
     #
@@ -89,14 +121,12 @@ class DynaMathManager:
                 return obj
         return None
 
-    def updateVariables(self):
-        self.variables = self.dyna_math.variables
-
     #
     # DEBUG/ERROR OUTPUT
     #
     def print(self, text):
-        self.dialog.print(text)
+        if self.dialog is not None:
+            self.dialog.print(text)
 
 
 def createTestModel(deck_name, model_name):
@@ -137,7 +167,7 @@ class TextHandler:
         self.variables = self.dyna_math.variables
         self.temp_variables = self.dyna_math.temp_variables
 
-    def parseRawText(self, text):
+    def parseRawText(self, text, execute=False, question=False):
         # parses raw text and saves any variables that are explicitly written along with what type of number it is.
         # converts raw text into text for a front of a card (without the values of the variables written)
         # variables are then used by the algorithm written by the user
@@ -160,7 +190,8 @@ class TextHandler:
                                 i = j
                                 break
                             else:
-                                self.print("ERROR: Variable does not exist: " + params[0])
+                                if not execute:
+                                    self.print("ERROR: Variable does not exist: " + params[0])
                                 special_data.pop()
                                 raise Exception
                         self.variables.append(Variable(params[0], params[1], params[2:]))
@@ -169,13 +200,21 @@ class TextHandler:
             i += 1
 
         final_str = text
-        for var in special_data:
-            self.print(str(var[0]))
 
-        for var in special_data:
-            final_str = final_str.replace(var[0], var[1])
+        if execute:
+            for var in special_data:  # var[0] = the whole { ...} | var[1] = variable name
+                variable = self.findVariable(var[1])
+                if variable is None:  # Then check temp variables
+                    # (temp/existing values should have final values at this point)
+                    value = self.temp_variables[var[1]]
+                    final_str = final_str.replace(var[0], str(value))
+                    return final_str
+                if question and variable.value == 0:
+                    variable.generateRandomValue()
+                    # showInfo("Question " + str(var[1]) + " " + str(variable.value))
+                final_str = final_str.replace(var[0], str(variable.value))
+                # showInfo(str(self.findVariable('x').value))
 
-        self.print("Final string: " + final_str)
         return final_str
 
     #
@@ -245,8 +284,9 @@ class AlgorithmHandler:
 
             var_name = processed_tokens[0][0]  # TODO: check if these are indeed var =
             logic = processed_tokens[2:]
-
+            self.print(str(var_name))
             var = self.findVariable(var_name)
+            self.print(str(var))
             if var is None:
                 self.print("Temp Variable")
                 self.temp_variables[var_name] = self.processLogic(logic)
@@ -507,4 +547,3 @@ def handleOperation(values, val2, val1, c):
         values.append(val2 / val1)
     elif c == '^':
         values.append(val2 ** val1)
-
