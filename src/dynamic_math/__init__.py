@@ -23,17 +23,9 @@ class CustomDialog(QDialog):
         self.mainLayout = QVBoxLayout(self)
         self.mainLayout.setAlignment(Qt.AlignTop)
         self.topHoriBtns = []
-        self.topVertBtns = []
 
-        self.action_addNote = None  # may need different solution, see setupEditCardGUI()
-
-        self.saved_texts = ['', '', '', '']
-        self.menu_triggered = 1
-        self.windowOpen = ''
-
-        self.deck = None
         self.note = None
-
+        self.oops = None
         # menu_triggered | 0 = graphic text ; 1 = question text ; 2 = answer text ; 3 = algorithm text
 
         # TOP TOOLBAR
